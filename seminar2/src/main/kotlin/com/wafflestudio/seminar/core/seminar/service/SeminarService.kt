@@ -3,6 +3,7 @@ package com.wafflestudio.seminar.core.seminar.service
 import com.wafflestudio.seminar.common.Seminar400
 import com.wafflestudio.seminar.core.seminar.api.request.CreateSeminarDTO
 import com.wafflestudio.seminar.core.seminar.api.request.JoinSeminarDTO
+import com.wafflestudio.seminar.core.seminar.database.SeminarDslRepository
 import com.wafflestudio.seminar.core.seminar.database.SeminarRepository
 import com.wafflestudio.seminar.core.seminar.database.UserSeminarEntity
 import com.wafflestudio.seminar.core.seminar.database.UserSeminarRepository
@@ -16,32 +17,33 @@ import java.time.LocalDateTime
 @Service
 class SeminarService(
     private val seminarRepository: SeminarRepository,
+    private val seminarDslRepository: SeminarDslRepository,
     private val userSeminarRepository: UserSeminarRepository
 ) {
     fun getSeminar(id: Long): Seminar {
         val seminarEntity = seminarRepository.findByIdOrNull(id) ?: throw Seminar400("$id 의 세미나는 존재하지 않습니다.")
         return seminarEntity.toSeminar()
     }
-    
-    fun getAllSeminar(name: String, order: String): List<Seminar> {
-        val seminars = seminarRepository.findAll()
-            .filter { it.name.contains(name) }
-            .sortedBy { it.createdAt }
-            .map { it.toSeminar() }
-            .reversed()
 
-        return if (order =="earliest") seminars.reversed() else seminars
+    @Transactional(readOnly = true)
+    fun getSeminarList(name: String, order: String): List<Seminar> {
+        val isAscending = order == "earliest"
+        val seminars = seminarDslRepository.getList(name, isAscending)
+        
+        return seminars.map { it.toSeminar() }
     }
     
     @Transactional
     fun createSeminar(user: UserEntity, createSeminarDTO: CreateSeminarDTO): Seminar {
+        if (user.instructor == null) {
+            throw Seminar400("강사가 아닌 사용자는 세미나를 생성할 수 없습니다.")
+        }
+        
         val seminarEntity = seminarRepository.save(createSeminarDTO.toEntity())
         val userSeminarEntity = userSeminarRepository.save(UserSeminarEntity(
             user = user,
             seminar = seminarEntity,
             role = "instructor",
-            joinedAt = LocalDateTime.now(),
-            isActive = true,
         ))
         user.userSeminars.add(userSeminarEntity)
         seminarEntity.userSeminars.add(userSeminarEntity)
@@ -85,8 +87,6 @@ class SeminarService(
             user = userEntity,
             seminar = seminarEntity,
             role = role,
-            joinedAt = LocalDateTime.now(),
-            isActive = true,
         )
         seminarEntity.userSeminars.add(userSeminar)
         userEntity.userSeminars.add(userSeminar)
@@ -100,10 +100,17 @@ class SeminarService(
         val seminarEntity = seminarRepository.findByIdOrNull(seminarId)
             ?: throw Seminar400("$seminarId 의 세미나는 존재하지 않습니다.")
 
-        val userSeminarEntity = userSeminarRepository.findAll()
+        val userSeminarEntityList = userSeminarRepository.findAll()
+        val userSeminarEntity = userSeminarEntityList
             .firstOrNull { it.user.id == userEntity.id && it.seminar.id == seminarId }
-            ?: return null
+            ?: throw Seminar400("세미나에 참여하고 있지 않습니다.")
 
+        val instructorUserSeminarEntityList = userSeminarEntityList
+            .filter { it.seminar.id == seminarId && it.role == "instructor" && it.isActive }
+        if (instructorUserSeminarEntityList.size == 1 && instructorUserSeminarEntityList[0].user.id == userEntity.id) {
+            throw Seminar400("세미나의 강사는 세미나를 드랍할 수 없습니다.")
+        }
+        
         if (!userSeminarEntity.isActive)
             throw Seminar400("이전에 이미 세미나를 드랍한 적이 있습니다.")
 
